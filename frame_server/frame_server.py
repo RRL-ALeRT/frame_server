@@ -8,7 +8,6 @@ from interactive_markers import InteractiveMarkerServer
 from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped
 
-
 class FrameServer(Node):
 
     def __init__(self):
@@ -20,29 +19,36 @@ class FrameServer(Node):
         self.frames = {}
         self.transforms = {}
 
-        self.create_subscription(
-            String,
-            "/create_frame",
-            self.create_marker_callback,
-            10
-        )
+        # Publishers / Subscribers
+        self.pub_active_frames = self.create_publisher(String, '/active_frames', 10)
+        
+        self.create_subscription(String, "/create_frame", self.create_marker_callback, 10)
+        self.create_subscription(String, "/delete_frame", self.delete_marker_callback, 10)
+        self.create_subscription(String, "/rename_frame", self.rename_marker_callback, 10)
 
         self.create_timer(0.1, self.broadcast_transforms)
 
-    def create_marker_callback(self, msg):
-        name = msg.data
+    def publish_active_frames(self):
+        msg = String()
+        # Publish a comma-separated list of active frame names
+        msg.data = ",".join(self.frames.keys())
+        self.pub_active_frames.publish(msg)
 
-        if name in self.frames:
-            self.get_logger().warn(f"{name} already exists")
-            return
-
+    def _create_interactive_marker(self, name, initial_tf=None):
         int_marker = InteractiveMarker()
         int_marker.header.frame_id = "map"
         int_marker.name = name
         int_marker.description = name
         int_marker.scale = 1.0
 
-        int_marker.pose.position.z = 1.0
+        if initial_tf:
+            # Reapply previous transform if recreating (e.g., during rename)
+            int_marker.pose.position.x = initial_tf.transform.translation.x
+            int_marker.pose.position.y = initial_tf.transform.translation.y
+            int_marker.pose.position.z = initial_tf.transform.translation.z
+            int_marker.pose.orientation = initial_tf.transform.rotation
+        else:
+            int_marker.pose.position.z = 1.0
 
         # Add a box marker for visualization
         box = Marker()
@@ -60,77 +66,75 @@ class FrameServer(Node):
         control.markers.append(box)
         int_marker.controls.append(control)
 
-        # Add interactive controls for translation and rotation
-        # Translation along the X-axis
-        control = InteractiveMarkerControl()
-        control.name = "move_x"
-        control.interaction_mode = InteractiveMarkerControl.MOVE_AXIS
-        control.orientation.w = 1.0
-        control.orientation.x = 1.0
-        control.orientation.y = 0.0
-        control.orientation.z = 0.0
-        int_marker.controls.append(control)
+        # Append standard translation/rotation controls...
+        axes = [
+            ("move_x", InteractiveMarkerControl.MOVE_AXIS, [1.0, 1.0, 0.0, 0.0]),
+            ("move_y", InteractiveMarkerControl.MOVE_AXIS, [1.0, 0.0, 1.0, 0.0]),
+            ("move_z", InteractiveMarkerControl.MOVE_AXIS, [1.0, 0.0, 0.0, 1.0]),
+            ("rotate_x", InteractiveMarkerControl.ROTATE_AXIS, [1.0, 1.0, 0.0, 0.0]),
+            ("rotate_y", InteractiveMarkerControl.ROTATE_AXIS, [1.0, 0.0, 1.0, 0.0]),
+            ("rotate_z", InteractiveMarkerControl.ROTATE_AXIS, [1.0, 0.0, 0.0, 1.0])
+        ]
 
-        # Translation along the Y-axis
-        control = InteractiveMarkerControl()
-        control.name = "move_y"
-        control.interaction_mode = InteractiveMarkerControl.MOVE_AXIS
-        control.orientation.w = 1.0
-        control.orientation.x = 0.0
-        control.orientation.y = 1.0
-        control.orientation.z = 0.0
-        int_marker.controls.append(control)
+        for ctrl_name, mode, orient in axes:
+            ctrl = InteractiveMarkerControl()
+            ctrl.name = ctrl_name
+            ctrl.interaction_mode = mode
+            ctrl.orientation.w, ctrl.orientation.x, ctrl.orientation.y, ctrl.orientation.z = orient
+            int_marker.controls.append(ctrl)
 
-        # Translation along the Z-axis
-        control = InteractiveMarkerControl()
-        control.name = "move_z"
-        control.interaction_mode = InteractiveMarkerControl.MOVE_AXIS
-        control.orientation.w = 1.0
-        control.orientation.x = 0.0
-        control.orientation.y = 0.0
-        control.orientation.z = 1.0
-        int_marker.controls.append(control)
-
-        # Rotation around the X-axis
-        control = InteractiveMarkerControl()
-        control.name = "rotate_x"
-        control.interaction_mode = InteractiveMarkerControl.ROTATE_AXIS
-        control.orientation.w = 1.0
-        control.orientation.x = 1.0
-        control.orientation.y = 0.0
-        control.orientation.z = 0.0
-        int_marker.controls.append(control)
-
-        # Rotation around the Y-axis
-        control = InteractiveMarkerControl()
-        control.name = "rotate_y"
-        control.interaction_mode = InteractiveMarkerControl.ROTATE_AXIS
-        control.orientation.w = 1.0
-        control.orientation.x = 0.0
-        control.orientation.y = 1.0
-        control.orientation.z = 0.0
-        int_marker.controls.append(control)
-
-        # Rotation around the Z-axis
-        control = InteractiveMarkerControl()
-        control.name = "rotate_z"
-        control.interaction_mode = InteractiveMarkerControl.ROTATE_AXIS
-        control.orientation.w = 1.0
-        control.orientation.x = 0.0
-        control.orientation.y = 0.0
-        control.orientation.z = 1.0
-        int_marker.controls.append(control)
-
-        # Insert the marker into the server
         self.server.insert(int_marker)
-
-        # Register the feedback callback
         self.server.setCallback(name, self.feedback_callback)
-
         self.server.applyChanges()
 
         self.frames[name] = True
+        
+        if initial_tf:
+            initial_tf.child_frame_id = name
+            self.transforms[name] = initial_tf
+
+    def create_marker_callback(self, msg):
+        name = msg.data
+        if name in self.frames:
+            self.get_logger().warn(f"{name} already exists")
+            return
+
+        self._create_interactive_marker(name)
         self.get_logger().info(f"Created frame {name}")
+        self.publish_active_frames()
+
+    def delete_marker_callback(self, msg):
+        name = msg.data
+        if name in self.frames:
+            del self.frames[name]
+            if name in self.transforms:
+                del self.transforms[name]
+            self.server.erase(name)
+            self.server.applyChanges()
+            self.get_logger().info(f"Deleted frame {name}")
+            self.publish_active_frames()
+
+    def rename_marker_callback(self, msg):
+        try:
+            old_name, new_name = msg.data.split('|')
+        except ValueError:
+            self.get_logger().error("Rename message format invalid. Expected 'old|new'")
+            return
+
+        if old_name in self.frames and new_name not in self.frames:
+            # Capture old state
+            old_tf = self.transforms.get(old_name)
+            
+            # Clean up old marker
+            del self.frames[old_name]
+            if old_name in self.transforms:
+                del self.transforms[old_name]
+            self.server.erase(old_name)
+
+            # Create new marker with old pose
+            self._create_interactive_marker(new_name, old_tf)
+            self.get_logger().info(f"Renamed frame {old_name} to {new_name}")
+            self.publish_active_frames()
 
     def feedback_callback(self, feedback):
         tf_msg = TransformStamped()
@@ -138,28 +142,23 @@ class FrameServer(Node):
         tf_msg.header.frame_id = "map"
         tf_msg.child_frame_id = feedback.marker_name
 
-        # Convert Point to Vector3
         tf_msg.transform.translation.x = feedback.pose.position.x
         tf_msg.transform.translation.y = feedback.pose.position.y
         tf_msg.transform.translation.z = feedback.pose.position.z
-
         tf_msg.transform.rotation = feedback.pose.orientation
 
         self.transforms[feedback.marker_name] = tf_msg
 
     def broadcast_transforms(self):
-        # Broadcast all stored transforms
         for name, tf_msg in self.transforms.items():
-            tf_msg.header.stamp = self.get_clock().now().to_msg()  # Update timestamp
+            tf_msg.header.stamp = self.get_clock().now().to_msg()
             self.tf_broadcaster.sendTransform(tf_msg)
-
 
 def main():
     rclpy.init()
     node = FrameServer()
     rclpy.spin(node)
     rclpy.shutdown()
-
 
 if __name__ == "__main__":
     main()
