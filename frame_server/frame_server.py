@@ -6,6 +6,7 @@ from visualization_msgs.msg import InteractiveMarker
 from visualization_msgs.msg import InteractiveMarkerControl
 from interactive_markers import InteractiveMarkerServer
 from tf2_ros import TransformBroadcaster
+from tf2_ros import Buffer, TransformListener
 from geometry_msgs.msg import TransformStamped
 
 class FrameServer(Node):
@@ -16,12 +17,16 @@ class FrameServer(Node):
         self.server = InteractiveMarkerServer(self, "frame_markers")
         self.tf_broadcaster = TransformBroadcaster(self)
 
+        # TF listener to look up external frames
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
         self.frames = {}
         self.transforms = {}
 
         # Publishers / Subscribers
         self.pub_active_frames = self.create_publisher(String, '/active_frames', 10)
-        
+
         self.create_subscription(String, "/create_frame", self.create_marker_callback, 10)
         self.create_subscription(String, "/delete_frame", self.delete_marker_callback, 10)
         self.create_subscription(String, "/rename_frame", self.rename_marker_callback, 10)
@@ -94,12 +99,54 @@ class FrameServer(Node):
             self.transforms[name] = initial_tf
 
     def create_marker_callback(self, msg):
-        name = msg.data
+        # Parse "name" or "name|reference_frame"
+        parts = msg.data.split('|')
+        name = parts[0]
+        reference_frame = parts[1] if len(parts) > 1 else None
+
         if name in self.frames:
             self.get_logger().warn(f"{name} already exists")
             return
 
-        self._create_interactive_marker(name)
+        # If a reference frame is given, copy its orientation
+        initial_tf = None
+        if reference_frame:
+            # First check our own transforms, then look up from TF tree
+            if reference_frame in self.transforms:
+                ref_tf = self.transforms[reference_frame]
+                initial_tf = TransformStamped()
+                initial_tf.header.frame_id = "map"
+                initial_tf.child_frame_id = name
+                initial_tf.transform.translation.x = 0.0
+                initial_tf.transform.translation.y = 0.0
+                initial_tf.transform.translation.z = 1.0
+                initial_tf.transform.rotation = ref_tf.transform.rotation
+                self.get_logger().info(
+                    f"Created frame '{name}' with orientation from internal '{reference_frame}'"
+                )
+            else:
+                # Try to look up the frame from the TF tree
+                try:
+                    tf_stamped = self.tf_buffer.lookup_transform(
+                        "map", reference_frame, rclpy.time.Time())
+                    initial_tf = TransformStamped()
+                    initial_tf.header.frame_id = "map"
+                    initial_tf.child_frame_id = name
+                    # Only copy orientation, set default position
+                    initial_tf.transform.translation.x = 0.0
+                    initial_tf.transform.translation.y = 0.0
+                    initial_tf.transform.translation.z = 1.0
+                    initial_tf.transform.rotation = tf_stamped.transform.rotation
+                    self.get_logger().info(
+                        f"Created frame '{name}' with orientation from TF '{reference_frame}'"
+                    )
+                except Exception as e:
+                    self.get_logger().warn(
+                        f"Reference frame '{reference_frame}' not found in TF tree: {e}. "
+                        f"Creating with default orientation."
+                    )
+
+        self._create_interactive_marker(name, initial_tf)
         self.get_logger().info(f"Created frame {name}")
         self.publish_active_frames()
 
