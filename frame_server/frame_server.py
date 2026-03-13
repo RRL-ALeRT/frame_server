@@ -23,6 +23,7 @@ class FrameServer(Node):
 
         self.frames = {}
         self.transforms = {}
+        self.marker_frame_ids = {}
 
         # Publishers / Subscribers
         self.pub_active_frames = self.create_publisher(String, '/active_frames', 10)
@@ -39,9 +40,11 @@ class FrameServer(Node):
         msg.data = ",".join(self.frames.keys())
         self.pub_active_frames.publish(msg)
 
-    def _create_interactive_marker(self, name, initial_tf=None):
+    def _create_interactive_marker(self, name, initial_tf=None, reference_frame=None):
+        frame_id = reference_frame if reference_frame else "map"
+
         int_marker = InteractiveMarker()
-        int_marker.header.frame_id = "map"
+        int_marker.header.frame_id = frame_id
         int_marker.name = name
         int_marker.description = name
         int_marker.scale = 1.0
@@ -93,10 +96,20 @@ class FrameServer(Node):
         self.server.applyChanges()
 
         self.frames[name] = True
-        
-        if initial_tf:
-            initial_tf.child_frame_id = name
-            self.transforms[name] = initial_tf
+
+        self.marker_frame_ids[name] = frame_id
+
+        # Keep a transform even before first interactive feedback (important for rename).
+        if initial_tf is None:
+            initial_tf = TransformStamped()
+            initial_tf.transform.translation.x = int_marker.pose.position.x
+            initial_tf.transform.translation.y = int_marker.pose.position.y
+            initial_tf.transform.translation.z = int_marker.pose.position.z
+            initial_tf.transform.rotation = int_marker.pose.orientation
+
+        initial_tf.header.frame_id = frame_id
+        initial_tf.child_frame_id = name
+        self.transforms[name] = initial_tf
 
     def create_marker_callback(self, msg):
         # Parse "name" or "name|reference_frame"
@@ -146,7 +159,7 @@ class FrameServer(Node):
                         f"Creating with default orientation."
                     )
 
-        self._create_interactive_marker(name, initial_tf)
+        self._create_interactive_marker(name, initial_tf, reference_frame)
         self.get_logger().info(f"Created frame {name}")
         self.publish_active_frames()
 
@@ -156,6 +169,8 @@ class FrameServer(Node):
             del self.frames[name]
             if name in self.transforms:
                 del self.transforms[name]
+            if name in self.marker_frame_ids:
+                del self.marker_frame_ids[name]
             self.server.erase(name)
             self.server.applyChanges()
             self.get_logger().info(f"Deleted frame {name}")
@@ -171,23 +186,31 @@ class FrameServer(Node):
         if old_name in self.frames and new_name not in self.frames:
             # Capture old state
             old_tf = self.transforms.get(old_name)
-            
+            old_frame_id = self.marker_frame_ids.get(old_name, "map")
+
             # Clean up old marker
             del self.frames[old_name]
             if old_name in self.transforms:
                 del self.transforms[old_name]
+            if old_name in self.marker_frame_ids:
+                del self.marker_frame_ids[old_name]
             self.server.erase(old_name)
 
             # Create new marker with old pose
-            self._create_interactive_marker(new_name, old_tf)
+            self._create_interactive_marker(new_name, old_tf, old_frame_id)
             self.get_logger().info(f"Renamed frame {old_name} to {new_name}")
             self.publish_active_frames()
 
     def feedback_callback(self, feedback):
         tf_msg = TransformStamped()
         tf_msg.header.stamp = self.get_clock().now().to_msg()
-        tf_msg.header.frame_id = "map"
+        tf_msg.header.frame_id = (
+            feedback.header.frame_id
+            if feedback.header.frame_id
+            else self.marker_frame_ids.get(feedback.marker_name, "map")
+        )
         tf_msg.child_frame_id = feedback.marker_name
+        self.marker_frame_ids[feedback.marker_name] = tf_msg.header.frame_id
 
         tf_msg.transform.translation.x = feedback.pose.position.x
         tf_msg.transform.translation.y = feedback.pose.position.y
