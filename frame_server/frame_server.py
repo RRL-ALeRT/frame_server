@@ -39,7 +39,7 @@ class FrameServer(Node):
         int_marker.header.frame_id = frame_id
         int_marker.name = name
         int_marker.description = name
-        int_marker.scale = 1.0
+        int_marker.scale = 0.15
 
         if initial_pose_stamped:
             int_marker.pose.position.x = initial_pose_stamped.transform.translation.x
@@ -51,9 +51,9 @@ class FrameServer(Node):
 
         box = Marker()
         box.type = Marker.CUBE
-        box.scale.x = 0.1
-        box.scale.y = 0.1
-        box.scale.z = 0.1
+        box.scale.x = 0.01
+        box.scale.y = 0.01
+        box.scale.z = 0.01
         box.color.r = 1.0
         box.color.a = 1.0
 
